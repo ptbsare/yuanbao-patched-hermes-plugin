@@ -4838,7 +4838,14 @@ def check_requirements() -> bool:
     Uses independent YUANBAO_PATCHED_ prefix to avoid conflicts with the
     built-in yuanbao platform.
     """
-    return bool(os.getenv("YUANBAO_PATCHED_APP_ID", "") and os.getenv("YUANBAO_PATCHED_APP_SECRET", ""))
+    #import logging as _dl
+    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] check_requirements called")
+    app_id = os.getenv("YUANBAO_PATCHED_APP_ID", "")
+    app_secret = os.getenv("YUANBAO_PATCHED_APP_SECRET", "")
+    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] YUANBAO_PATCHED_APP_ID=%s, YUANBAO_PATCHED_APP_SECRET=%s", bool(app_id), bool(app_secret))
+    result = bool(app_id and app_secret)
+    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] check_requirements returning %s", result)
+    return result
 
 
 def validate_config(config) -> bool:
@@ -4851,6 +4858,8 @@ def validate_config(config) -> bool:
 
 def register(ctx):
     """Plugin entry point — called by the Hermes plugin system."""
+    #import logging as _dl
+    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] register() called for yuanbao_patched")
     ctx.register_platform(
         name="yuanbao_patched",
         label="Yuanbao Patched",
@@ -4871,3 +4880,4 @@ def register(ctx):
             "is preserved in the conversation history."
         ),
     )
+    _dl.getLogger(__name__).info("[PLUGIN_DEBUG] register() done for yuanbao_patched")
