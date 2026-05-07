@@ -154,7 +154,7 @@ _INDICATOR_RE = re.compile(r'\s*\(\d+/\d+\)$')
 # Observed-media backfill: how many recent transcript messages to scan
 OBSERVED_MEDIA_BACKFILL_LOOKBACK = 50
 # Max number of resource references to resolve per inbound turn
-OBSERVED_MEDIA_BACKFILL_MAX_RESOLVE_PER_TURN = 7
+OBSERVED_MEDIA_BACKFILL_MAX_RESOLVE_PER_TURN = 1
 
 class MarkdownProcessor:
     """Encapsulates all Markdown-related utilities for the Yuanbao platform.
@@ -2430,7 +2430,7 @@ class MediaResolveMiddleware(InboundMiddleware):
         start = max(0, len(history) - OBSERVED_MEDIA_BACKFILL_LOOKBACK)
         order: List[Tuple[str, str, str]] = []  # (rid, kind, filename)
         seen: set = set()
-        for msg in history[start:]:
+        for msg in history[:start-1:-1]:
             content = msg.get("content")
             if not isinstance(content, str) or "|ybres:" not in content:
                 continue
