@@ -2021,7 +2021,7 @@ class GroupAtGuardMiddleware(InboundMiddleware):
         )
 
     @staticmethod
-    def _observe_group_message(
+    async def _observe_group_message(
         adapter, source, sender_display: str, text: str,
         *, msg_id: Optional[str] = None,
         media_refs: Optional[List[Dict[str, str]]] = None,
@@ -2033,11 +2033,11 @@ class GroupAtGuardMiddleware(InboundMiddleware):
         in the format ``[nickname|user_id]\\n<content>`` so the model
         can distinguish participants and their user ids.
 
-        Media references (images/files) are encoded as ``[kind|ybres:resourceId]``
-        anchors in the content so that ``MediaResolveMiddleware._collect_observed_media``
-        can later resolve them back to downloadable URLs.  This fixes the bug where
-        observed group images/files were lost because only the placeholder text
-        (e.g. ``[image]``) was stored.
+        Media resources (images/files) are downloaded to local cache immediately
+        and stored as local absolute paths in the content, so the model can
+        directly access them without needing to resolve ybres anchors later.
+        This eliminates the stale-anchor bug and ensures the agent always has
+        usable file paths in observed history.
         """
         store = getattr(adapter, "_session_store", None)
         if not store:
@@ -2046,9 +2046,10 @@ class GroupAtGuardMiddleware(InboundMiddleware):
             session_entry = store.get_or_create_session(source)
             user_id = source.user_id or "unknown"
 
-            # Build content: text + media resource anchors
-            # Media anchors use the same [kind|ybres:rid] format that
-            # _YB_RES_REF_RE expects, so _collect_observed_media can find them.
+            # Build content: text + media local paths
+            # Download resources immediately so the transcript stores absolute
+            # local cache paths instead of ybres anchors. This way the model
+            # always sees usable paths in observed history.
             content_parts = []
             if text:
                 content_parts.append(text)
@@ -2070,17 +2071,42 @@ class GroupAtGuardMiddleware(InboundMiddleware):
                         pass
                     # Fallback: if URL itself looks like a resourceId (alphanumeric), use it directly
                     if not resource_id and url:
-                        # Some URLs may be direct resource IDs or contain them in the path
                         path_basename = os.path.basename(urllib.parse.urlparse(url).path)
                         if path_basename and re.match(r'^[A-Za-z0-9_\-]+$', path_basename):
                             resource_id = path_basename
-                    if resource_id:
-                        if kind == "file":
-                            file_name = str(ref.get("name") or "").strip()
-                            anchor = f"[file:{file_name}|ybres:{resource_id}]" if file_name else f"[file|ybres:{resource_id}]"
-                        else:
-                            anchor = f"[image|ybres:{resource_id}]"
-                        content_parts.append(anchor)
+                    if not resource_id:
+                        continue
+
+                    # Download the resource to local cache immediately
+                    file_name = str(ref.get("name") or "").strip() or None
+                    try:
+                        fetch_url = await MediaResolveMiddleware._resolve_by_resource_id(adapter, resource_id)
+                        cached = await MediaResolveMiddleware._download_and_cache(
+                            adapter,
+                            fetch_url=fetch_url,
+                            kind=kind,
+                            file_name=file_name,
+                            log_tag=f"observed_rid={resource_id}",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] observed-media download failed: rid=%s kind=%s err=%s",
+                            adapter.name, resource_id, kind, exc,
+                        )
+                        # Fallback: keep the original URL so context isn't lost
+                        content_parts.append(f"[{kind}: {file_name or url}]")
+                        continue
+
+                    if cached is None:
+                        content_parts.append(f"[{kind}: {file_name or url}]")
+                        continue
+
+                    local_path, mime = cached
+                    if kind == "file":
+                        label = file_name or os.path.basename(local_path)
+                        content_parts.append(f"[file: {label} → {local_path}]")
+                    else:
+                        content_parts.append(f"[image: {local_path}]")
 
             full_content = " ".join(content_parts) if content_parts else ""
             attributed = f"[{sender_display}|{user_id}]\n{full_content}"
@@ -2102,7 +2128,7 @@ class GroupAtGuardMiddleware(InboundMiddleware):
     async def handle(self, ctx: InboundContext, next_fn) -> None:
         adapter = ctx.adapter
         if ctx.chat_type == "group" and not ctx.owner_command and not self._is_at_bot(ctx.msg_body, adapter._bot_id):
-            self._observe_group_message(
+            await self._observe_group_message(
                 adapter, ctx.source, ctx.sender_nickname or ctx.from_account, ctx.raw_text,
                 msg_id=ctx.msg_id or None,
                 media_refs=ctx.media_refs or None,
