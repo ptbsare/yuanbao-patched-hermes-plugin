@@ -1,0 +1,14 @@
+name: yuanbao_patched
+kind: platform
+version: 1.0.0
+description: >
+  Yuanbao (元宝) platform adapter with patched group chat media support.
+  Fixes the bug where observed group images/files were lost because only
+  placeholder text (e.g. "[image]") was stored in the transcript without
+  the ybres resource IDs needed for later media recovery.
+  Uses independent YUANBAO_PATCHED_ prefix to avoid conflicts with the
+  built-in yuanbao platform.
+author: ptbsare
+requires_env:
+  - YUANBAO_PATCHED_APP_ID
+  - YUANBAO_PATCHED_APP_SECRET
