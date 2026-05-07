@@ -889,7 +889,7 @@ class InboundContext:
     engine passes it to every middleware in registration order.
     """
 
-    adapter: Any  # YuanbaoAdapter (forward-ref avoids circular import)
+    adapter: Any  # YuanbaoPatchedAdapter (forward-ref avoids circular import)
     raw_frames: list = dc_field(default_factory=list)  # Raw bytes frames (debounce-aggregated)
 
     # Populated by DecodeMiddleware
@@ -2601,7 +2601,7 @@ class DispatchMiddleware(InboundMiddleware):
         await next_fn()
 
     @staticmethod
-    async def _consume_group_queue(adapter: "YuanbaoAdapter", session_key: str) -> None:
+    async def _consume_group_queue(adapter: "YuanbaoPatchedAdapter", session_key: str) -> None:
         """Drain the group queue one dispatch at a time, waiting for each to finish."""
         _IDLE_TIMEOUT = 2.0
         queue = adapter._group_queues.get(session_key)
@@ -2665,7 +2665,7 @@ class InboundPipelineBuilder:
         return pipeline
 
 class ConnectionManager:
-    """Manages the WebSocket connection lifecycle for YuanbaoAdapter.
+    """Manages the WebSocket connection lifecycle for YuanbaoPatchedAdapter.
 
     Responsibilities:
       - Opening and closing the WebSocket
@@ -2675,7 +2675,7 @@ class ConnectionManager:
       - Reconnect with exponential backoff
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
         self._adapter = adapter
         self._ws = None  # websockets connection
         self._connect_id: Optional[str] = None
@@ -2803,7 +2803,7 @@ class ConnectionManager:
                 adapter.name, self._connect_id, adapter._bot_id,
             )
 
-            YuanbaoAdapter.set_active(adapter)
+            YuanbaoPatchedAdapter.set_active(adapter)
 
             return True
 
@@ -2838,7 +2838,7 @@ class ConnectionManager:
             self._recv_task = None
 
         # Fail any pending ACK futures
-        disc_exc = RuntimeError("YuanbaoAdapter disconnected")
+        disc_exc = RuntimeError("YuanbaoPatchedAdapter disconnected")
         for fut in self._pending_acks.values():
             if not fut.done():
                 fut.set_exception(disc_exc)
@@ -3335,7 +3335,7 @@ class MediaSendHandler(ABC):
 
     @abstractmethod
     async def acquire_file(
-        self, adapter: "YuanbaoAdapter", **kwargs: Any,
+        self, adapter: "YuanbaoPatchedAdapter", **kwargs: Any,
     ) -> Tuple[bytes, str, str]:
         """Return (file_bytes, filename, content_type).
 
@@ -3353,7 +3353,7 @@ class MediaSendHandler(ABC):
 
     async def handle(
         self,
-        adapter: "YuanbaoAdapter",
+        adapter: "YuanbaoPatchedAdapter",
         chat_id: str,
         reply_to: Optional[str] = None,
         caption: Optional[str] = None,
@@ -3594,7 +3594,7 @@ class GroupQueryService:
       - Member cache population on the adapter
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
         self._adapter = adapter
 
     # ------------------------------------------------------------------
@@ -3745,7 +3745,7 @@ class HeartbeatManager:
       - Explicit stop with optional FINISH signal
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
         self._adapter = adapter
         self._reply_heartbeat_tasks: Dict[str, asyncio.Task] = {}
         self._reply_hb_last_active: Dict[str, float] = {}
@@ -3866,7 +3866,7 @@ class SlowResponseNotifier:
     SLOW_RESPONSE_TIMEOUT_S seconds, sends a courtesy message.
     """
 
-    def __init__(self, adapter: "YuanbaoAdapter", sender: "MessageSender") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter", sender: "MessageSender") -> None:
         self._adapter = adapter
         self._sender = sender
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -3909,7 +3909,7 @@ class SlowResponseNotifier:
 
 
 class MessageSender:
-    """Core message sending dispatcher for YuanbaoAdapter.
+    """Core message sending dispatcher for YuanbaoPatchedAdapter.
 
     Responsibilities:
       - Per-chat-id lock management (serial send ordering)
@@ -3922,7 +3922,7 @@ class MessageSender:
     IMAGE_EXTS: ClassVar[frozenset] = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
     CHAT_DICT_MAX_SIZE: ClassVar[int] = 1000  # Max distinct chat IDs in _chat_locks
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
         self._adapter = adapter
         self._chat_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()
 
@@ -4242,7 +4242,7 @@ class MessageSender:
 
     @staticmethod
     async def _dispatch_encoded(
-        adapter: "YuanbaoAdapter", encoded: bytes, req_id: str,
+        adapter: "YuanbaoPatchedAdapter", encoded: bytes, req_id: str,
     ) -> dict:
         """Send pre-encoded bytes via WS and return a normalised result dict."""
         try:
@@ -4341,14 +4341,14 @@ class OutboundManager:
       - HeartbeatManager — reply heartbeat (RUNNING / FINISH) lifecycle
       - SlowResponseNotifier — delayed 'please wait' notifications
 
-    YuanbaoAdapter holds a single ``_outbound: OutboundManager`` and delegates
+    YuanbaoPatchedAdapter holds a single ``_outbound: OutboundManager`` and delegates
     all outbound operations through it.
     """
 
     # Expose class-level constants from MessageSender for backward compatibility
     CHAT_DICT_MAX_SIZE: ClassVar[int] = MessageSender.CHAT_DICT_MAX_SIZE
 
-    def __init__(self, adapter: "YuanbaoAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
         self._adapter = adapter
         self.sender: MessageSender = MessageSender(adapter)
         self.heartbeat: HeartbeatManager = HeartbeatManager(adapter)
@@ -4368,7 +4368,7 @@ class OutboundManager:
         """Called by MessageSender after sending: send FINISH heartbeat."""
         await self.heartbeat.send_heartbeat_once(chat_id, WS_HEARTBEAT_FINISH)
 
-    # -- Delegated public API (used by YuanbaoAdapter) ---------------------
+    # -- Delegated public API (used by YuanbaoPatchedAdapter) ---------------------
 
     async def send_text(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
@@ -4436,7 +4436,7 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
     ybres resource IDs in observed transcript entries.
     """
 
-    PLATFORM = Platform("yuanbao_patched")
+    #PLATFORM = Platform("yuanbao_patched")
     MAX_TEXT_CHUNK: int = 4000  # Yuanbao single message character limit
     MEDIA_MAX_SIZE_MB: int = 50  # Max media file size in MB for upload validation
     REPLY_REF_MAX_ENTRIES: ClassVar[int] = 500  # Max capacity of reference dedup dict
@@ -4592,8 +4592,8 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Cancel background tasks and close the WebSocket connection."""
-        if YuanbaoAdapter._active_instance is self:
-            YuanbaoAdapter.set_active(None)
+        if YuanbaoPatchedAdapter._active_instance is self:
+            YuanbaoPatchedAdapter.set_active(None)
 
         self._running = False
         self._mark_disconnected()
