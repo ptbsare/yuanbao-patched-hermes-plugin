@@ -152,7 +152,7 @@ _YB_RES_REF_RE = re.compile(
 _INDICATOR_RE = re.compile(r'\s*\(\d+/\d+\)$')
 
 # Observed-media backfill: how many recent transcript messages to scan
-OBSERVED_MEDIA_BACKFILL_LOOKBACK = 21
+OBSERVED_MEDIA_BACKFILL_LOOKBACK = 50
 # Max number of resource references to resolve per inbound turn
 OBSERVED_MEDIA_BACKFILL_MAX_RESOLVE_PER_TURN = 7
 
