@@ -1,19 +1,19 @@
 """
-Yuanbao Patched platform adapter (plugin).
+Yuanbao platform adapter (plugin override).
 
-A drop-in replacement for the built-in yuanbao adapter that fixes the group
-chat media bug: observed (non-@bot) group messages resource transcript so that
-Media._collect_resources() can recover them later.
+Drop-in replacement for the built-in yuanbao adapter that fixes the group
+chat media bug: observed (non-@bot) group messages now download media resources
+to local cache immediately so the model can access them directly.
 
-Configuration in config.yaml:
+Configuration in config.yaml (or via env vars):
     platforms:
-      yuanbao_patched:
+      yuanbao:
         extra:
-          app_id: "..."              # or YUANBAO_PATCHED_APP_ID
-          app_secret: "..."          # or YUANBAO_PATCHED_APP_SECRET
-          bot_id: "..."              # or YUANBAO_PATCHED_BOT_ID  (optional, returned by sign-token)
-          ws_url: "wss://..."        # or YUANBAO_PATCHED_WS_URL
-          api_domain: "https://..."  # or YUANBAO_PATCHED_API_DOMAIN
+          app_id: "..."              # or YUANBAO_APP_ID
+          app_secret: "..."          # or YUANBAO_APP_SECRET
+          bot_id: "..."              # or YUANBAO_BOT_ID  (optional, returned by sign-token)
+          ws_url: "wss://..."        # or YUANBAO_WS_URL
+          api_domain: "https://..."  # or YUANBAO_API_DOMAIN
 """
 
 from __future__ import annotations
@@ -889,7 +889,7 @@ class InboundContext:
     engine passes it to every middleware in registration order.
     """
 
-    adapter: Any  # YuanbaoPatchedAdapter (forward-ref avoids circular import)
+    adapter: Any  # YuanbaoPluginAdapter (forward-ref avoids circular import)
     raw_frames: list = dc_field(default_factory=list)  # Raw bytes frames (debounce-aggregated)
 
     # Populated by DecodeMiddleware
@@ -1574,7 +1574,7 @@ class AutoSetHomeMiddleware(InboundMiddleware):
     async def handle(self, ctx: InboundContext, next_fn) -> None:
         adapter = ctx.adapter
         if not adapter._auto_sethome_done:
-            _cur_home = os.getenv("YUANBAO_PATCHED_HOME_CHANNEL", "")
+            _cur_home = os.getenv("YUANBAO_HOME_CHANNEL", "")
             _should_set = (
                 not _cur_home
                 or (_cur_home.startswith("group:") and ctx.chat_type == "dm")
@@ -1593,9 +1593,9 @@ class AutoSetHomeMiddleware(InboundMiddleware):
                     if config_path.exists():
                         with open(config_path, encoding="utf-8") as f:
                             user_config = yaml.safe_load(f) or {}
-                    user_config["YUANBAO_PATCHED_HOME_CHANNEL"] = ctx.chat_id
+                    user_config["YUANBAO_HOME_CHANNEL"] = ctx.chat_id
                     atomic_yaml_write(config_path, user_config)
-                    os.environ["YUANBAO_PATCHED_HOME_CHANNEL"] = str(ctx.chat_id)
+                    os.environ["YUANBAO_HOME_CHANNEL"] = str(ctx.chat_id)
                     logger.info(
                         "[%s] Auto-sethome: designated %s (%s) as Yuanbao home channel",
                         adapter.name, ctx.chat_id, ctx.chat_name,
@@ -2627,7 +2627,7 @@ class DispatchMiddleware(InboundMiddleware):
         await next_fn()
 
     @staticmethod
-    async def _consume_group_queue(adapter: "YuanbaoPatchedAdapter", session_key: str) -> None:
+    async def _consume_group_queue(adapter: "YuanbaoPluginAdapter", session_key: str) -> None:
         """Drain the group queue one dispatch at a time, waiting for each to finish."""
         _IDLE_TIMEOUT = 2.0
         queue = adapter._group_queues.get(session_key)
@@ -2691,7 +2691,7 @@ class InboundPipelineBuilder:
         return pipeline
 
 class ConnectionManager:
-    """Manages the WebSocket connection lifecycle for YuanbaoPatchedAdapter.
+    """Manages the WebSocket connection lifecycle for YuanbaoPluginAdapter.
 
     Responsibilities:
       - Opening and closing the WebSocket
@@ -2701,7 +2701,7 @@ class ConnectionManager:
       - Reconnect with exponential backoff
     """
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter") -> None:
         self._adapter = adapter
         self._ws = None  # websockets connection
         self._connect_id: Optional[str] = None
@@ -2762,7 +2762,7 @@ class ConnectionManager:
         if not adapter._app_key or not adapter._app_secret:
             msg = (
                 "Yuanbao startup failed: "
-                "YUANBAO_PATCHED_APP_ID and YUANBAO_PATCHED_APP_SECRET are required"
+                "YUANBAO_APP_ID and YUANBAO_APP_SECRET are required"
             )
             adapter._set_fatal_error("yuanbao_missing_credentials", msg, retryable=False)
             logger.error("[%s] %s", adapter.name, msg)
@@ -2829,7 +2829,16 @@ class ConnectionManager:
                 adapter.name, self._connect_id, adapter._bot_id,
             )
 
-            YuanbaoPatchedAdapter.set_active(adapter)
+            YuanbaoPluginAdapter.set_active(adapter)
+
+            # Compatibility shim: also set the built-in YuanbaoAdapter's active
+            # instance so that send_message_tool.py's get_active_adapter() and
+            # yuanbao_tools.py's _get_active_adapter() return this plugin instance.
+            try:
+                from gateway.platforms.yuanbao import YuanbaoAdapter as _BuiltinYA
+                _BuiltinYA.set_active(adapter)
+            except Exception:
+                pass
 
             return True
 
@@ -2864,7 +2873,7 @@ class ConnectionManager:
             self._recv_task = None
 
         # Fail any pending ACK futures
-        disc_exc = RuntimeError("YuanbaoPatchedAdapter disconnected")
+        disc_exc = RuntimeError("YuanbaoPluginAdapter disconnected")
         for fut in self._pending_acks.values():
             if not fut.done():
                 fut.set_exception(disc_exc)
@@ -3361,7 +3370,7 @@ class MediaSendHandler(ABC):
 
     @abstractmethod
     async def acquire_file(
-        self, adapter: "YuanbaoPatchedAdapter", **kwargs: Any,
+        self, adapter: "YuanbaoPluginAdapter", **kwargs: Any,
     ) -> Tuple[bytes, str, str]:
         """Return (file_bytes, filename, content_type).
 
@@ -3379,7 +3388,7 @@ class MediaSendHandler(ABC):
 
     async def handle(
         self,
-        adapter: "YuanbaoPatchedAdapter",
+        adapter: "YuanbaoPluginAdapter",
         chat_id: str,
         reply_to: Optional[str] = None,
         caption: Optional[str] = None,
@@ -3620,7 +3629,7 @@ class GroupQueryService:
       - Member cache population on the adapter
     """
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter") -> None:
         self._adapter = adapter
 
     # ------------------------------------------------------------------
@@ -3771,7 +3780,7 @@ class HeartbeatManager:
       - Explicit stop with optional FINISH signal
     """
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter") -> None:
         self._adapter = adapter
         self._reply_heartbeat_tasks: Dict[str, asyncio.Task] = {}
         self._reply_hb_last_active: Dict[str, float] = {}
@@ -3892,7 +3901,7 @@ class SlowResponseNotifier:
     SLOW_RESPONSE_TIMEOUT_S seconds, sends a courtesy message.
     """
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter", sender: "MessageSender") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter", sender: "MessageSender") -> None:
         self._adapter = adapter
         self._sender = sender
         self._tasks: Dict[str, asyncio.Task] = {}
@@ -3935,7 +3944,7 @@ class SlowResponseNotifier:
 
 
 class MessageSender:
-    """Core message sending dispatcher for YuanbaoPatchedAdapter.
+    """Core message sending dispatcher for YuanbaoPluginAdapter.
 
     Responsibilities:
       - Per-chat-id lock management (serial send ordering)
@@ -3948,7 +3957,7 @@ class MessageSender:
     IMAGE_EXTS: ClassVar[frozenset] = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
     CHAT_DICT_MAX_SIZE: ClassVar[int] = 1000  # Max distinct chat IDs in _chat_locks
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter") -> None:
         self._adapter = adapter
         self._chat_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()
 
@@ -4268,7 +4277,7 @@ class MessageSender:
 
     @staticmethod
     async def _dispatch_encoded(
-        adapter: "YuanbaoPatchedAdapter", encoded: bytes, req_id: str,
+        adapter: "YuanbaoPluginAdapter", encoded: bytes, req_id: str,
     ) -> dict:
         """Send pre-encoded bytes via WS and return a normalised result dict."""
         try:
@@ -4367,14 +4376,14 @@ class OutboundManager:
       - HeartbeatManager — reply heartbeat (RUNNING / FINISH) lifecycle
       - SlowResponseNotifier — delayed 'please wait' notifications
 
-    YuanbaoPatchedAdapter holds a single ``_outbound: OutboundManager`` and delegates
+    YuanbaoPluginAdapter holds a single ``_outbound: OutboundManager`` and delegates
     all outbound operations through it.
     """
 
     # Expose class-level constants from MessageSender for backward compatibility
     CHAT_DICT_MAX_SIZE: ClassVar[int] = MessageSender.CHAT_DICT_MAX_SIZE
 
-    def __init__(self, adapter: "YuanbaoPatchedAdapter") -> None:
+    def __init__(self, adapter: "YuanbaoPluginAdapter") -> None:
         self._adapter = adapter
         self.sender: MessageSender = MessageSender(adapter)
         self.heartbeat: HeartbeatManager = HeartbeatManager(adapter)
@@ -4394,7 +4403,7 @@ class OutboundManager:
         """Called by MessageSender after sending: send FINISH heartbeat."""
         await self.heartbeat.send_heartbeat_once(chat_id, WS_HEARTBEAT_FINISH)
 
-    # -- Delegated public API (used by YuanbaoPatchedAdapter) ---------------------
+    # -- Delegated public API (used by YuanbaoPluginAdapter) ---------------------
 
     async def send_text(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
@@ -4455,63 +4464,43 @@ class OutboundManager:
         await self.slow_notifier.close()
 
 
-class YuanbaoPatchedAdapter(BasePlatformAdapter):
+class YuanbaoPluginAdapter(BasePlatformAdapter):
     """Yuanbao AI Bot adapter backed by a persistent WebSocket connection.
 
-    Patched version (plugin): fixes group chat media loss by preserving
-    ybres resource IDs in observed transcript entries.
+    Plugin override: fixes group chat media loss by downloading observed
+    media resources to local cache immediately.
     """
 
-    #PLATFORM = Platform("yuanbao_patched")
+    PLATFORM = Platform("yuanbao")
     MAX_TEXT_CHUNK: int = 4000  # Yuanbao single message character limit
     MEDIA_MAX_SIZE_MB: int = 50  # Max media file size in MB for upload validation
     REPLY_REF_MAX_ENTRIES: ClassVar[int] = 500  # Max capacity of reference dedup dict
 
     # -- Active instance registry (class-level singleton) -------------------
 
-    _active_instance: ClassVar[Optional["YuanbaoPatchedAdapter"]] = None
+    _active_instance: ClassVar[Optional["YuanbaoPluginAdapter"]] = None
 
     @classmethod
-    def get_active(cls) -> Optional["YuanbaoPatchedAdapter"]:
-        """Return the currently connected YuanbaoPatchedAdapter, or None."""
+    def get_active(cls) -> Optional["YuanbaoPluginAdapter"]:
+        """Return the currently connected YuanbaoPluginAdapter, or None."""
         return cls._active_instance
 
     @classmethod
-    def set_active(cls, adapter: Optional["YuanbaoPatchedAdapter"]) -> None:
+    def set_active(cls, adapter: Optional["YuanbaoPluginAdapter"]) -> None:
         """Register (or clear) the active adapter instance."""
         cls._active_instance = adapter
 
     def __init__(self, config: PlatformConfig, **kwargs: Any) -> None:
-        super().__init__(config, Platform("yuanbao_patched"))
+        super().__init__(config, Platform.YUANBAO)
 
-        # Credentials / endpoints — read from YUANBAO_PATCHED_* env vars
-        # (independent from the built-in yuanbao platform's YUANBAO_* vars).
-        # config.extra is also accepted as an override (for config.yaml users).
+        # Credentials / endpoints from config.extra (populated by config.py from env/yaml)
         _extra = config.extra or {}
-        self._app_key: str = (
-            os.getenv("YUANBAO_PATCHED_APP_ID")
-            or _extra.get("app_id", "")
-        ).strip()
-        self._app_secret: str = (
-            os.getenv("YUANBAO_PATCHED_APP_SECRET")
-            or _extra.get("app_secret", "")
-        ).strip()
-        self._bot_id: Optional[str] = (
-            os.getenv("YUANBAO_PATCHED_BOT_ID")
-            or _extra.get("bot_id")
-        ) or None
-        self._ws_url: str = (
-            os.getenv("YUANBAO_PATCHED_WS_URL")
-            or _extra.get("ws_url", DEFAULT_WS_GATEWAY_URL)
-        ).strip()
-        self._api_domain: str = (
-            os.getenv("YUANBAO_PATCHED_API_DOMAIN")
-            or _extra.get("api_domain", DEFAULT_API_DOMAIN)
-        ).rstrip("/")
-        self._route_env: str = (
-            os.getenv("YUANBAO_PATCHED_ROUTE_ENV")
-            or _extra.get("route_env", "")
-        ).strip()
+        self._app_key: str = (_extra.get("app_id") or "").strip()
+        self._app_secret: str = (_extra.get("app_secret") or "").strip()
+        self._bot_id: Optional[str] = _extra.get("bot_id") or None
+        self._ws_url: str = (_extra.get("ws_url") or DEFAULT_WS_GATEWAY_URL).strip()
+        self._api_domain: str = (_extra.get("api_domain") or DEFAULT_API_DOMAIN).rstrip("/")
+        self._route_env: str = (_extra.get("route_env") or "").strip()
 
         # Core managers (UML composition)
         self._connection: ConnectionManager = ConnectionManager(self)
@@ -4550,23 +4539,23 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
         # ------------------------------------------------------------------
         dm_policy: str = (
             _extra.get("dm_policy")
-            or os.getenv("YUANBAO_PATCHED_DM_POLICY", "open")
+            or os.getenv("YUANBAO_DM_POLICY", "open")
         ).strip().lower()
 
         _dm_allow_from_raw: str = (
             _extra.get("dm_allow_from")
-            or os.getenv("YUANBAO_PATCHED_DM_ALLOW_FROM", "")
+            or os.getenv("YUANBAO_DM_ALLOW_FROM", "")
         )
         dm_allow_from: list[str] = [x.strip() for x in _dm_allow_from_raw.split(",") if x.strip()]
 
         group_policy: str = (
             _extra.get("group_policy")
-            or os.getenv("YUANBAO_PATCHED_GROUP_POLICY", "open")
+            or os.getenv("YUANBAO_GROUP_POLICY", "open")
         ).strip().lower()
 
         _group_allow_from_raw: str = (
             _extra.get("group_allow_from")
-            or os.getenv("YUANBAO_PATCHED_GROUP_ALLOW_FROM", "")
+            or os.getenv("YUANBAO_GROUP_ALLOW_FROM", "")
         )
         group_allow_from: list[str] = [x.strip() for x in _group_allow_from_raw.split(",") if x.strip()]
 
@@ -4590,7 +4579,7 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
         # channel is a group chat (group:xxx), it stays eligible for
         # upgrade — the first DM will override it with direct:xxx.
         # ------------------------------------------------------------------
-        _existing_home = os.getenv("YUANBAO_PATCHED_HOME_CHANNEL") or (
+        _existing_home = os.getenv("YUANBAO_HOME_CHANNEL") or (
             config.home_channel.chat_id if config.home_channel else ""
         )
         self._auto_sethome_done: bool = bool(_existing_home) and not _existing_home.startswith("group:")
@@ -4618,8 +4607,14 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Cancel background tasks and close the WebSocket connection."""
-        if YuanbaoPatchedAdapter._active_instance is self:
-            YuanbaoPatchedAdapter.set_active(None)
+        if YuanbaoPluginAdapter._active_instance is self:
+            YuanbaoPluginAdapter.set_active(None)
+            # Compatibility shim: also clear the built-in YuanbaoAdapter's active instance.
+            try:
+                from gateway.platforms.yuanbao import YuanbaoAdapter as _BuiltinYA
+                _BuiltinYA.set_active(None)
+            except Exception:
+                pass
 
         self._running = False
         self._mark_disconnected()
@@ -4839,13 +4834,13 @@ class YuanbaoPatchedAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
-def get_active_adapter() -> Optional["YuanbaoPatchedAdapter"]:
-    """Delegate to ``YuanbaoPatchedAdapter.get_active()``."""
-    return YuanbaoPatchedAdapter.get_active()
+def get_active_adapter() -> Optional["YuanbaoPluginAdapter"]:
+    """Delegate to ``YuanbaoPluginAdapter.get_active()``."""
+    return YuanbaoPluginAdapter.get_active()
 
 
 async def send_yuanbao_direct(
-    adapter: "YuanbaoPatchedAdapter",
+    adapter: "YuanbaoPluginAdapter",
     chat_id: str,
     message: str,
     media_files: Optional[List[Tuple[str, bool]]] = None,
@@ -4859,51 +4854,39 @@ async def send_yuanbao_direct(
 # ---------------------------------------------------------------------------
 
 def check_requirements() -> bool:
-    """Check if the yuanbao_patched adapter can be used.
-
-    Uses independent YUANBAO_PATCHED_ prefix to avoid conflicts with the
-    built-in yuanbao platform.
-    """
-    #import logging as _dl
-    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] check_requirements called")
-    app_id = os.getenv("YUANBAO_PATCHED_APP_ID", "")
-    app_secret = os.getenv("YUANBAO_PATCHED_APP_SECRET", "")
-    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] YUANBAO_PATCHED_APP_ID=%s, YUANBAO_PATCHED_APP_SECRET=%s", bool(app_id), bool(app_secret))
-    result = bool(app_id and app_secret)
-    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] check_requirements returning %s", result)
-    return result
+    """Check if the yuanbao plugin adapter can be used."""
+    app_id = os.getenv("YUANBAO_APP_ID", "")
+    app_secret = os.getenv("YUANBAO_APP_SECRET", "")
+    return bool(app_id and app_secret)
 
 
 def validate_config(config) -> bool:
     """Validate that the platform config has enough info to connect."""
     extra = getattr(config, "extra", {}) or {}
-    app_id = os.getenv("YUANBAO_PATCHED_APP_ID") or extra.get("app_id", "")
-    app_secret = os.getenv("YUANBAO_PATCHED_APP_SECRET") or extra.get("app_secret", "")
+    app_id = os.getenv("YUANBAO_APP_ID") or extra.get("app_id", "")
+    app_secret = os.getenv("YUANBAO_APP_SECRET") or extra.get("app_secret", "")
     return bool(app_id and app_secret)
 
 
 def register(ctx):
     """Plugin entry point — called by the Hermes plugin system."""
-    #import logging as _dl
-    #_dl.getLogger(__name__).info("[PLUGIN_DEBUG] register() called for yuanbao_patched")
     ctx.register_platform(
-        name="yuanbao_patched",
-        label="Yuanbao Patched",
-        adapter_factory=lambda cfg: YuanbaoPatchedAdapter(cfg),
+        name="yuanbao",
+        label="Yuanbao (Plugin)",
+        adapter_factory=lambda cfg: YuanbaoPluginAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
-        required_env=["YUANBAO_PATCHED_APP_ID", "YUANBAO_PATCHED_APP_SECRET"],
+        required_env=["YUANBAO_APP_ID", "YUANBAO_APP_SECRET"],
         install_hint="pip install websockets httpx",
-        allowed_users_env="YUANBAO_PATCHED_ALLOWED_USERS",
-        allow_all_env="YUANBAO_PATCHED_ALLOW_ALL_USERS",
+        allowed_users_env="YUANBAO_ALLOWED_USERS",
+        allow_all_env="YUANBAO_ALLOW_ALL_USERS",
         max_message_length=4000,
         emoji="🤖",
         pii_safe=False,
         allow_update_command=True,
         platform_hint=(
-            "You are chatting via Yuanbao (元宝) patched group media support. "
+            "You are chatting via Yuanbao (元宝) with patched group media support. "
             "Group chat context (including images and files from non-@bot messages) "
             "is preserved in the conversation history."
         ),
     )
-    _dl.getLogger(__name__).info("[PLUGIN_DEBUG] register() done for yuanbao_patched")
